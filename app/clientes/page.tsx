@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   onSnapshot,
@@ -12,6 +13,7 @@ import {
   setDoc,
 } from "firebase/firestore";
 import {
+  deleteObject,
   getDownloadURL,
   ref as storageRef,
   uploadBytes,
@@ -105,6 +107,47 @@ type FacturaMes = {
       fecha?: string;
     }>;
   };
+};
+
+
+
+type ArchivoSoporteMaster = {
+  nombre?: string;
+  url?: string;
+  path?: string;
+  tipo?: string;
+};
+
+
+type DatosSoporteGlobal = {
+  whatsappSoporte: string;
+  emailSoporteAdmin: string;
+  emailSoporteTecnico: string;
+  updatedAt?: unknown;
+};
+
+type SolicitudSoporteMaster = {
+  id: string;
+  globalId: string;
+  tipo: "tecnico" | "administrativo" | string;
+  asunto: string;
+  descripcion: string;
+  prioridad: "baja" | "media" | "alta" | "critica" | string;
+  estado: "abierto" | "en proceso" | "resuelto" | "cerrado" | string;
+  modulo: string;
+  solicitanteId: string;
+  solicitanteNombre: string;
+  solicitanteEmail: string;
+  clienteId: string;
+  clienteNombre: string;
+  soporteIdCliente: string;
+  destino: string;
+  archivos?: ArchivoSoporteMaster[];
+  respuesta?: string;
+  fechaSolicitud?: unknown;
+  fechaSolicitudTexto?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
 };
 
 type Cliente = {
@@ -288,6 +331,117 @@ const formatMoney = (value?: number | string) => {
   }).format(numberValue);
 };
 
+const formatFechaSoporte = (value: unknown) => {
+  if (!value) return "Sin fecha";
+
+  try {
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime())
+        ? "Sin fecha"
+        : value.toLocaleString("es-CO", {
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+    }
+
+    if (typeof value === "string") {
+      const fecha = new Date(value);
+      return Number.isNaN(fecha.getTime())
+        ? value
+        : fecha.toLocaleString("es-CO", {
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+    }
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const fecha = new Date(value);
+      return Number.isNaN(fecha.getTime())
+        ? "Sin fecha"
+        : fecha.toLocaleString("es-CO", {
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+    }
+
+    if (typeof value === "object" && value !== null) {
+      const posibleFecha = value as {
+        toDate?: () => Date;
+        seconds?: number;
+        nanoseconds?: number;
+        _seconds?: number;
+      };
+
+      if (typeof posibleFecha.toDate === "function") {
+        const fecha = posibleFecha.toDate();
+        return Number.isNaN(fecha.getTime())
+          ? "Sin fecha"
+          : fecha.toLocaleString("es-CO", {
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+            });
+      }
+
+      const seconds = posibleFecha.seconds ?? posibleFecha._seconds;
+      if (typeof seconds === "number" && Number.isFinite(seconds)) {
+        const fecha = new Date(seconds * 1000);
+        return Number.isNaN(fecha.getTime())
+          ? "Sin fecha"
+          : fecha.toLocaleString("es-CO", {
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+            });
+      }
+    }
+  } catch {
+    return "Sin fecha";
+  }
+
+  return "Sin fecha";
+};
+
+const valorFechaSoporte = (soporte: Pick<SolicitudSoporteMaster, "fechaSolicitud" | "fechaSolicitudTexto" | "createdAt" | "updatedAt">) =>
+  soporte.fechaSolicitud || soporte.fechaSolicitudTexto || soporte.createdAt || soporte.updatedAt;
+
+const timestampSoporte = (soporte: Pick<SolicitudSoporteMaster, "fechaSolicitud" | "fechaSolicitudTexto" | "createdAt" | "updatedAt">) => {
+  const value = valorFechaSoporte(soporte);
+  if (!value) return 0;
+
+  try {
+    if (value instanceof Date) return value.getTime();
+    if (typeof value === "string") {
+      const fecha = new Date(value);
+      return Number.isNaN(fecha.getTime()) ? 0 : fecha.getTime();
+    }
+    if (typeof value === "number") return value;
+    if (typeof value === "object" && value !== null) {
+      const posibleFecha = value as { toDate?: () => Date; seconds?: number; _seconds?: number };
+      if (typeof posibleFecha.toDate === "function") return posibleFecha.toDate().getTime();
+      const seconds = posibleFecha.seconds ?? posibleFecha._seconds;
+      if (typeof seconds === "number") return seconds * 1000;
+    }
+  } catch {
+    return 0;
+  }
+
+  return 0;
+};
+
 const normalizarSeguimientos = (
   value?: FacturaMes["seguimientos"],
 ): SeguimientoCartera[] => {
@@ -325,6 +479,26 @@ export default function ClientesPage() {
   );
   const [diasMora, setDiasMora] = useState(30);
   const [cambiosSinGuardar, setCambiosSinGuardar] = useState(false);
+  const [soportesGlobales, setSoportesGlobales] = useState<SolicitudSoporteMaster[]>([]);
+  const [busquedaSoportes, setBusquedaSoportes] = useState("");
+  const [filtroSoporteTipo, setFiltroSoporteTipo] = useState<"todos" | "tecnico" | "administrativo">("todos");
+  const [filtroSoporteEstado, setFiltroSoporteEstado] = useState<"todos" | "abierto" | "en proceso" | "resuelto" | "cerrado">("todos");
+  const [soporteDetalle, setSoporteDetalle] = useState<SolicitudSoporteMaster | null>(null);
+  const [respuestaSoporte, setRespuestaSoporte] = useState("");
+  const [guardandoSoporte, setGuardandoSoporte] = useState(false);
+  const [modalDatosSoporte, setModalDatosSoporte] = useState(false);
+  const [datosSoporte, setDatosSoporte] = useState<DatosSoporteGlobal>({
+    whatsappSoporte: "",
+    emailSoporteAdmin: "",
+    emailSoporteTecnico: "",
+  });
+  const [datosSoporteTemp, setDatosSoporteTemp] = useState<DatosSoporteGlobal>({
+    whatsappSoporte: "",
+    emailSoporteAdmin: "",
+    emailSoporteTecnico: "",
+  });
+  const [guardandoDatosSoporte, setGuardandoDatosSoporte] = useState(false);
+
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
@@ -396,6 +570,89 @@ export default function ClientesPage() {
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    const refConfig = doc(db, "configuracionGlobal", "soporte");
+    const unsubscribe = onSnapshot(
+      refConfig,
+      (snapshot) => {
+        const data = snapshot.exists() ? (snapshot.data() as Partial<DatosSoporteGlobal>) : {};
+        setDatosSoporte({
+          whatsappSoporte: String(data.whatsappSoporte || ""),
+          emailSoporteAdmin: String(data.emailSoporteAdmin || ""),
+          emailSoporteTecnico: String(data.emailSoporteTecnico || ""),
+          updatedAt: data.updatedAt,
+        });
+      },
+      (error) => console.error("Error cargando datos de soporte:", error),
+    );
+
+    return () => unsubscribe();
+  }, []);
+
+
+  useEffect(() => {
+    const normalizarSoporte = (
+      documentoId: string,
+      data: Record<string, unknown>,
+      tipoFallback: "tecnico" | "administrativo",
+    ): SolicitudSoporteMaster => ({
+      id: String(data.soporteIdCliente || data.id || documentoId),
+      globalId: documentoId,
+      tipo: String(data.tipo || tipoFallback),
+      asunto: String(data.asunto || "Sin asunto"),
+      descripcion: String(data.descripcion || "Sin descripción"),
+      prioridad: String(data.prioridad || "media"),
+      estado: String(data.estado || "abierto"),
+      modulo: String(data.modulo || "General"),
+      solicitanteId: String(data.solicitanteId || ""),
+      solicitanteNombre: String(data.solicitanteNombre || "Solicitante"),
+      solicitanteEmail: String(data.solicitanteEmail || ""),
+      clienteId: String(data.clienteId || ""),
+      clienteNombre: String(data.clienteNombre || data.razonSocial || "Cliente"),
+      soporteIdCliente: String(data.soporteIdCliente || data.id || documentoId),
+      destino: String(data.destino || (tipoFallback === "tecnico" ? "soporte_tecnico" : "soporte_administrativo")),
+      archivos: Array.isArray(data.archivos) ? (data.archivos as ArchivoSoporteMaster[]) : [],
+      respuesta: String(data.respuesta || ""),
+      fechaSolicitud: data.fechaSolicitud || data.fechaSolicitudTexto || data.createdAt,
+      fechaSolicitudTexto: String(data.fechaSolicitudTexto || ""),
+      createdAt: data.createdAt,
+      updatedAt: data.updatedAt,
+    });
+
+    const unsubTecnico = onSnapshot(
+      collection(db, "soportesGlobal", "soporte_tecnico", "solicitudes"),
+      (snapshot) => {
+        setSoportesGlobales((actual) => {
+          const otros = actual.filter((item) => item.tipo !== "tecnico");
+          const nuevos = snapshot.docs.map((item) =>
+            normalizarSoporte(item.id, item.data() as Record<string, unknown>, "tecnico"),
+          );
+          return [...otros, ...nuevos];
+        });
+      },
+      (error) => console.error("Error cargando soportes técnicos:", error),
+    );
+
+    const unsubAdministrativo = onSnapshot(
+      collection(db, "soportesGlobal", "soporte_administrativo", "solicitudes"),
+      (snapshot) => {
+        setSoportesGlobales((actual) => {
+          const otros = actual.filter((item) => item.tipo !== "administrativo");
+          const nuevos = snapshot.docs.map((item) =>
+            normalizarSoporte(item.id, item.data() as Record<string, unknown>, "administrativo"),
+          );
+          return [...otros, ...nuevos];
+        });
+      },
+      (error) => console.error("Error cargando soportes administrativos:", error),
+    );
+
+    return () => {
+      unsubTecnico();
+      unsubAdministrativo();
+    };
+  }, []);
+
   const clientesFiltrados = useMemo(() => {
     const q = busqueda.trim().toLowerCase();
     if (!q) return clientes;
@@ -429,6 +686,99 @@ export default function ClientesPage() {
 
     return { total: clientes.length, activos, suspendidos, mora };
   }, [clientes]);
+
+
+  const soportesFiltrados = useMemo(() => {
+    const texto = busquedaSoportes.trim().toLowerCase();
+    return soportesGlobales
+      .filter((item) => (filtroSoporteTipo === "todos" ? true : item.tipo === filtroSoporteTipo))
+      .filter((item) => (filtroSoporteEstado === "todos" ? true : item.estado === filtroSoporteEstado))
+      .filter((item) => {
+        if (!texto) return true;
+        return [
+          item.asunto,
+          item.descripcion,
+          item.modulo,
+          item.prioridad,
+          item.estado,
+          item.tipo,
+          item.solicitanteNombre,
+          item.solicitanteEmail,
+          item.clienteNombre,
+          item.clienteId,
+          formatFechaSoporte(valorFechaSoporte(item)),
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(texto);
+      })
+      .sort((a, b) => {
+        const ordenEstado = (estado: string) => {
+          const valor = estado.toLowerCase();
+          if (valor === "abierto") return 0;
+          if (valor === "en proceso") return 1;
+          if (valor === "resuelto") return 2;
+          return 3;
+        };
+        const ordenPrioridad: Record<string, number> = { critica: 0, alta: 1, media: 2, baja: 3 };
+        return (
+          ordenEstado(a.estado) - ordenEstado(b.estado) ||
+          (ordenPrioridad[a.prioridad] ?? 9) - (ordenPrioridad[b.prioridad] ?? 9) ||
+          timestampSoporte(b) - timestampSoporte(a)
+        );
+      });
+  }, [soportesGlobales, busquedaSoportes, filtroSoporteTipo, filtroSoporteEstado]);
+
+
+
+  const soportesAgrupadosPorCliente = useMemo(() => {
+    const grupos = new Map<string, {
+      clienteId: string;
+      clienteNombre: string;
+      total: number;
+      abiertos: number;
+      proceso: number;
+      tecnico: number;
+      administrativo: number;
+      solicitudes: SolicitudSoporteMaster[];
+    }>();
+
+    soportesFiltrados.forEach((soporte) => {
+      const key = soporte.clienteId || soporte.clienteNombre || "sin_cliente";
+      const grupo = grupos.get(key) || {
+        clienteId: soporte.clienteId || "N/A",
+        clienteNombre: soporte.clienteNombre || "Cliente sin nombre",
+        total: 0,
+        abiertos: 0,
+        proceso: 0,
+        tecnico: 0,
+        administrativo: 0,
+        solicitudes: [],
+      };
+
+      grupo.total += 1;
+      if (soporte.estado === "abierto") grupo.abiertos += 1;
+      if (soporte.estado === "en proceso") grupo.proceso += 1;
+      if (soporte.tipo === "tecnico") grupo.tecnico += 1;
+      if (soporte.tipo === "administrativo") grupo.administrativo += 1;
+      grupo.solicitudes.push(soporte);
+      grupos.set(key, grupo);
+    });
+
+    return Array.from(grupos.values()).sort((a, b) => {
+      const pendientesA = a.abiertos + a.proceso;
+      const pendientesB = b.abiertos + b.proceso;
+      return pendientesB - pendientesA || b.total - a.total || a.clienteNombre.localeCompare(b.clienteNombre, "es");
+    });
+  }, [soportesFiltrados]);
+
+  const statsSoportes = useMemo(() => {
+    const abiertos = soportesGlobales.filter((item) => item.estado === "abierto").length;
+    const proceso = soportesGlobales.filter((item) => item.estado === "en proceso").length;
+    const tecnico = soportesGlobales.filter((item) => item.tipo === "tecnico" && item.estado !== "resuelto" && item.estado !== "cerrado").length;
+    const administrativo = soportesGlobales.filter((item) => item.tipo === "administrativo" && item.estado !== "resuelto" && item.estado !== "cerrado").length;
+    return { total: soportesGlobales.length, abiertos, proceso, tecnico, administrativo };
+  }, [soportesGlobales]);
 
   const documentosAprobados = useMemo(() => {
     const docs = Object.values(clienteActual.documentos || {});
@@ -727,6 +1077,156 @@ export default function ClientesPage() {
       .length;
   };
 
+  const estiloEstadoSoporte = (estado: string) => {
+    const valor = estado.toLowerCase();
+    if (valor === "resuelto" || valor === "cerrado") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    if (valor === "en proceso") return "border-amber-200 bg-amber-50 text-amber-700";
+    return "border-red-200 bg-red-50 text-red-700";
+  };
+
+  const estiloPrioridadSoporte = (prioridad: string) => {
+    const valor = prioridad.toLowerCase();
+    if (valor === "critica") return "border-red-200 bg-red-50 text-red-700";
+    if (valor === "alta") return "border-orange-200 bg-orange-50 text-orange-700";
+    if (valor === "baja") return "border-slate-200 bg-slate-50 text-slate-600";
+    return "border-sky-200 bg-sky-50 text-sky-700";
+  };
+
+  const actualizarSoporte = async (
+    soporte: SolicitudSoporteMaster,
+    patch: Partial<Pick<SolicitudSoporteMaster, "estado" | "respuesta">>,
+  ) => {
+    setGuardandoSoporte(true);
+    try {
+      const destino = soporte.tipo === "administrativo" ? "soporte_administrativo" : "soporte_tecnico";
+      const payload = {
+        ...patch,
+        updatedAt: serverTimestamp(),
+      };
+
+      await setDoc(
+        doc(db, "soportesGlobal", destino, "solicitudes", soporte.globalId),
+        payload,
+        { merge: true },
+      );
+
+      if (soporte.clienteId && soporte.soporteIdCliente) {
+        await setDoc(
+          doc(db, "clientes", soporte.clienteId, "soportes", soporte.soporteIdCliente),
+          payload,
+          { merge: true },
+        );
+      }
+
+      setSoporteDetalle((actual) => (actual?.globalId === soporte.globalId ? { ...actual, ...patch } : actual));
+      setRespuestaSoporte("");
+      setMensaje("Solicitud de soporte actualizada correctamente.");
+    } catch (error) {
+      console.error("Error actualizando soporte:", error);
+      setMensaje("No fue posible actualizar la solicitud de soporte.");
+    } finally {
+      setGuardandoSoporte(false);
+    }
+  };
+
+  const eliminarSoporte = async (soporte: SolicitudSoporteMaster) => {
+    const confirmar = window.confirm(
+      `Se eliminará completamente este soporte:\n\n${soporte.asunto}\n\nEsto borra el registro global, el registro del cliente y los archivos adjuntos asociados. ¿Desea continuar?`,
+    );
+
+    if (!confirmar || guardandoSoporte) return;
+
+    setGuardandoSoporte(true);
+    try {
+      const destino = soporte.tipo === "administrativo" ? "soporte_administrativo" : "soporte_tecnico";
+      const rutasGlobales = [
+        doc(db, "soportesGlobal", destino, "solicitudes", soporte.globalId),
+      ];
+
+      // Se intenta borrar también en la colección alterna por seguridad,
+      // útil si el tipo fue cambiado o si quedó una copia duplicada.
+      const destinoAlterno = destino === "soporte_tecnico" ? "soporte_administrativo" : "soporte_tecnico";
+      rutasGlobales.push(doc(db, "soportesGlobal", destinoAlterno, "solicitudes", soporte.globalId));
+
+      const borradosFirestore = [
+        ...rutasGlobales.map((referencia) => deleteDoc(referencia).catch(() => undefined)),
+      ];
+
+      if (soporte.clienteId && soporte.soporteIdCliente) {
+        borradosFirestore.push(
+          deleteDoc(doc(db, "clientes", soporte.clienteId, "soportes", soporte.soporteIdCliente)).catch(() => undefined),
+        );
+      }
+
+      await Promise.all(borradosFirestore);
+
+      const archivos = Array.isArray(soporte.archivos) ? soporte.archivos : [];
+      await Promise.all(
+        archivos
+          .map((archivo) => archivo.path)
+          .filter((path): path is string => Boolean(path))
+          .map((path) => deleteObject(storageRef(storage, path)).catch(() => undefined)),
+      );
+
+      setSoportesGlobales((actual) =>
+        actual.filter((item) => item.globalId !== soporte.globalId),
+      );
+      if (soporteDetalle?.globalId === soporte.globalId) setSoporteDetalle(null);
+      setMensaje("Solicitud de soporte eliminada completamente.");
+    } catch (error) {
+      console.error("Error eliminando soporte:", error);
+      setMensaje("No fue posible eliminar completamente la solicitud de soporte.");
+    } finally {
+      setGuardandoSoporte(false);
+    }
+  };
+
+  const abrirDatosSoporte = () => {
+    setDatosSoporteTemp({
+      whatsappSoporte: datosSoporte.whatsappSoporte || "",
+      emailSoporteAdmin: datosSoporte.emailSoporteAdmin || "",
+      emailSoporteTecnico: datosSoporte.emailSoporteTecnico || "",
+    });
+    setMensaje("");
+    setModalDatosSoporte(true);
+  };
+
+  const guardarDatosSoporte = async () => {
+    if (guardandoDatosSoporte) return;
+
+    const whatsapp = datosSoporteTemp.whatsappSoporte.trim();
+    const emailAdmin = datosSoporteTemp.emailSoporteAdmin.trim().toLowerCase();
+    const emailTecnico = datosSoporteTemp.emailSoporteTecnico.trim().toLowerCase();
+
+    if (!whatsapp || !emailAdmin || !emailTecnico) {
+      setMensaje("Completa WhatsApp, correo administrativo y correo técnico de soporte.");
+      return;
+    }
+
+    setGuardandoDatosSoporte(true);
+    try {
+      await setDoc(
+        doc(db, "configuracionGlobal", "soporte"),
+        {
+          whatsappSoporte: whatsapp,
+          emailSoporteAdmin: emailAdmin,
+          emailSoporteTecnico: emailTecnico,
+          actualizadoPor: usuario?.uid || "",
+          actualizadoPorEmail: usuario?.email || "",
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true },
+      );
+      setMensaje("Datos de soporte guardados correctamente.");
+      setModalDatosSoporte(false);
+    } catch (error) {
+      console.error("Error guardando datos de soporte:", error);
+      setMensaje("No fue posible guardar los datos de soporte.");
+    } finally {
+      setGuardandoDatosSoporte(false);
+    }
+  };
+
   const cerrarSesion = async () => {
     await signOut(auth);
     router.replace("/login");
@@ -921,6 +1421,12 @@ export default function ClientesPage() {
               </button>
             )}
             <button
+              onClick={abrirDatosSoporte}
+              className="rounded-2xl border border-blue-400/30 bg-blue-500/10 px-4 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-500/20"
+            >
+              Datos de soporte
+            </button>
+            <button
               onClick={cerrarSesion}
               className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-bold text-white transition hover:bg-white/20"
             >
@@ -953,6 +1459,136 @@ export default function ClientesPage() {
             helper="Mora o pago parcial"
             tone="amber"
           />
+        </section>
+
+        <section className="mb-6 rounded-3xl border border-white/10 bg-white/[0.07] p-5 shadow-2xl backdrop-blur-xl">
+          <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[0.25em] text-blue-700">Mesa de soporte</p>
+              <h2 className="mt-1 text-xl font-black">Peticiones de soporte</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Vista máster de solicitudes técnicas y administrativas enviadas por los clientes.
+              </p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-4 xl:w-[760px]">
+              <input
+                value={busquedaSoportes}
+                onChange={(event) => setBusquedaSoportes(event.target.value)}
+                placeholder="Buscar soporte, cliente, módulo..."
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 outline-none focus:border-blue-400"
+              />
+              <select
+                value={filtroSoporteTipo}
+                onChange={(event) => setFiltroSoporteTipo(event.target.value as any)}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 outline-none focus:border-blue-400"
+              >
+                <option value="todos">Todos los tipos</option>
+                <option value="tecnico">Técnico</option>
+                <option value="administrativo">Administrativo</option>
+              </select>
+              <select
+                value={filtroSoporteEstado}
+                onChange={(event) => setFiltroSoporteEstado(event.target.value as any)}
+                className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 outline-none focus:border-blue-400"
+              >
+                <option value="todos">Todos los estados</option>
+                <option value="abierto">Abierto</option>
+                <option value="en proceso">En proceso</option>
+                <option value="resuelto">Resuelto</option>
+                <option value="cerrado">Cerrado</option>
+              </select>
+              <div className="rounded-2xl bg-slate-50 px-4 py-3 text-center">
+                <p className="text-lg font-black text-blue-700">{statsSoportes.abiertos + statsSoportes.proceso}</p>
+                <p className="text-[10px] font-black uppercase text-slate-500">Pendientes</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mb-4 grid gap-3 md:grid-cols-4">
+            <MiniPanel label="Técnicos activos" value={statsSoportes.tecnico} tone="red" />
+            <MiniPanel label="Administrativos activos" value={statsSoportes.administrativo} tone="emerald" />
+            <MiniPanel label="Abiertos" value={statsSoportes.abiertos} tone="red" />
+            <MiniPanel label="En proceso" value={statsSoportes.proceso} tone="emerald" />
+          </div>
+
+          {soportesAgrupadosPorCliente.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 bg-white px-4 py-8 text-center text-sm font-bold text-slate-500">
+              No hay peticiones de soporte para los filtros seleccionados.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {soportesAgrupadosPorCliente.map((grupo) => (
+                <article key={`${grupo.clienteId}-${grupo.clienteNombre}`} className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex flex-col gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h3 className="text-base font-black text-slate-800">{grupo.clienteNombre}</h3>
+                      <p className="text-xs font-semibold text-slate-500">NIT {grupo.clienteId || "N/A"}</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-[10px] font-black uppercase">
+                      <span className="rounded-full bg-slate-200 px-3 py-1 text-slate-700">{grupo.total} total</span>
+                      <span className="rounded-full bg-red-50 px-3 py-1 text-red-700">{grupo.tecnico} técnico(s)</span>
+                      <span className="rounded-full bg-blue-50 px-3 py-1 text-blue-700">{grupo.administrativo} admin.</span>
+                      <span className="rounded-full bg-amber-50 px-3 py-1 text-amber-700">{grupo.abiertos} abierto(s)</span>
+                      <span className="rounded-full bg-indigo-50 px-3 py-1 text-indigo-700">{grupo.proceso} en proceso</span>
+                    </div>
+                  </div>
+
+                  <div className="divide-y divide-slate-100">
+                    {grupo.solicitudes.map((soporte) => (
+                      <div key={`${soporte.tipo}-${soporte.globalId}`} className="grid gap-3 px-4 py-4 text-sm lg:grid-cols-[160px_1fr_145px_150px_120px_130px] lg:items-center">
+                        <div>
+                          <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase ${soporte.tipo === "tecnico" ? "bg-red-50 text-red-700" : "bg-blue-50 text-blue-700"}`}>
+                            {soporte.tipo === "tecnico" ? "Técnico" : "Administrativo"}
+                          </span>
+                          <p className="mt-2 text-xs font-semibold text-slate-400">{soporte.solicitanteNombre}</p>
+                          <p className="text-[11px] text-slate-400">{soporte.solicitanteEmail}</p>
+                        </div>
+                        <div>
+                          <p className="font-black text-slate-700">{soporte.asunto}</p>
+                          <p className="mt-1 line-clamp-2 text-xs font-semibold text-slate-500">{soporte.descripcion}</p>
+                          <p className="mt-1 text-[11px] font-bold text-slate-400">Módulo: {soporte.modulo || "General"}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">Fecha solicitud</p>
+                          <p className="mt-1 text-xs font-black text-slate-700">{formatFechaSoporte(valorFechaSoporte(soporte))}</p>
+                        </div>
+                        <div>
+                          <span className={`rounded-full border px-3 py-1 text-[10px] font-black uppercase ${estiloPrioridadSoporte(soporte.prioridad)}`}>
+                            {soporte.prioridad}
+                          </span>
+                        </div>
+                        <div>
+                          <span className={`rounded-full border px-3 py-1 text-[10px] font-black uppercase ${estiloEstadoSoporte(soporte.estado)}`}>
+                            {soporte.estado}
+                          </span>
+                        </div>
+                        <div className="flex flex-col gap-2 lg:items-end">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSoporteDetalle(soporte);
+                              setRespuestaSoporte(soporte.respuesta || "");
+                            }}
+                            className="w-full rounded-xl bg-blue-600 px-4 py-2 text-xs font-black text-white hover:bg-blue-500 lg:w-auto"
+                          >
+                            Ver / Gestionar
+                          </button>
+                          <button
+                            type="button"
+                            disabled={guardandoSoporte}
+                            onClick={() => eliminarSoporte(soporte)}
+                            className="w-full rounded-xl bg-red-600 px-4 py-2 text-xs font-black text-white hover:bg-red-500 disabled:opacity-60 lg:w-auto"
+                          >
+                            Eliminar
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="rounded-3xl border border-white/10 bg-white/[0.07] p-5 shadow-2xl backdrop-blur-xl">
@@ -1098,6 +1734,212 @@ export default function ClientesPage() {
           </div>
         </section>
       </section>
+
+      {soporteDetalle && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 px-3 py-4 backdrop-blur">
+          <div className="mx-auto max-w-4xl overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-slate-50 px-5 py-4">
+              <div>
+                <p className="text-xs font-black uppercase tracking-[0.25em] text-blue-700">Detalle de soporte</p>
+                <h3 className="mt-1 text-xl font-black">{soporteDetalle.asunto}</h3>
+                <p className="mt-1 text-sm font-semibold text-slate-500">
+                  {soporteDetalle.clienteNombre} · {soporteDetalle.tipo === "tecnico" ? "Técnico" : "Administrativo"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSoporteDetalle(null)}
+                className="rounded-xl bg-white px-4 py-2 text-xl font-black text-slate-500 shadow-sm hover:bg-slate-100"
+              >
+                ×
+              </button>
+            </div>
+            <div className="grid gap-5 p-5 lg:grid-cols-[1fr_280px]">
+              <section className="space-y-4">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-black uppercase tracking-wider text-slate-500">Descripción</p>
+                  <p className="mt-2 whitespace-pre-wrap text-sm font-semibold text-slate-700">{soporteDetalle.descripcion}</p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="text-xs font-black uppercase text-slate-500">Solicitante</p>
+                    <p className="mt-1 font-black text-slate-800">{soporteDetalle.solicitanteNombre}</p>
+                    <p className="text-xs font-semibold text-slate-500">{soporteDetalle.solicitanteEmail}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="text-xs font-black uppercase text-slate-500">Módulo</p>
+                    <p className="mt-1 font-black text-slate-800">{soporteDetalle.modulo || "General"}</p>
+                    <p className="text-xs font-semibold text-slate-500">Prioridad: {soporteDetalle.prioridad}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <p className="text-xs font-black uppercase tracking-wider text-slate-500">Respuesta / seguimiento</p>
+                  <textarea
+                    value={respuestaSoporte}
+                    onChange={(event) => setRespuestaSoporte(event.target.value)}
+                    rows={5}
+                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 outline-none focus:border-blue-400"
+                    placeholder="Escribe la respuesta o seguimiento para esta solicitud..."
+                  />
+                  <button
+                    type="button"
+                    disabled={guardandoSoporte}
+                    onClick={() => actualizarSoporte(soporteDetalle, { respuesta: respuestaSoporte })}
+                    className="mt-3 rounded-2xl bg-blue-600 px-5 py-3 text-sm font-black text-white hover:bg-blue-500 disabled:opacity-60"
+                  >
+                    Guardar respuesta
+                  </button>
+                </div>
+
+                {Array.isArray(soporteDetalle.archivos) && soporteDetalle.archivos.length > 0 && (
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="text-xs font-black uppercase tracking-wider text-slate-500">Archivos adjuntos</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {soporteDetalle.archivos.map((archivo, index) => (
+                        <a
+                          key={`${archivo.url}-${index}`}
+                          href={archivo.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-black text-blue-700 hover:bg-slate-200"
+                        >
+                          {archivo.nombre || `Archivo ${index + 1}`}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              <aside className="rounded-3xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs font-black uppercase tracking-wider text-slate-500">Estado de gestión</p>
+                <div className="mt-3 grid gap-2">
+                  {(["abierto", "en proceso", "resuelto", "cerrado"] as const).map((estado) => (
+                    <button
+                      key={estado}
+                      type="button"
+                      disabled={guardandoSoporte}
+                      onClick={() => actualizarSoporte(soporteDetalle, { estado })}
+                      className={`rounded-2xl border px-4 py-3 text-xs font-black uppercase disabled:opacity-60 ${soporteDetalle.estado === estado ? estiloEstadoSoporte(estado) : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"}`}
+                    >
+                      {estado}
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-5 rounded-2xl bg-white p-3 text-xs font-semibold text-slate-500">
+                  <p><b>Cliente:</b> {soporteDetalle.clienteNombre}</p>
+                  <p><b>NIT:</b> {soporteDetalle.clienteId || "N/A"}</p>
+                  <p><b>Fecha solicitud:</b> {formatFechaSoporte(valorFechaSoporte(soporteDetalle))}</p>
+                  <p><b>Estado:</b> {soporteDetalle.estado}</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={guardandoSoporte}
+                  onClick={() => eliminarSoporte(soporteDetalle)}
+                  className="mt-4 w-full rounded-2xl bg-red-600 px-4 py-3 text-xs font-black uppercase text-white hover:bg-red-500 disabled:opacity-60"
+                >
+                  Eliminar soporte completo
+                </button>
+              </aside>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {modalDatosSoporte && (
+        <div className="fixed inset-0 z-[70] overflow-y-auto bg-black/70 px-3 py-6 backdrop-blur">
+          <div className="mx-auto max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white text-slate-900 shadow-2xl">
+            <div className="border-b border-slate-200 bg-slate-50 p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.25em] text-blue-700">Configuración global</p>
+                  <h2 className="mt-1 text-2xl font-black">Datos de soporte</h2>
+                  <p className="mt-2 text-sm text-slate-500">Estos datos se usan para orientar las solicitudes administrativas y técnicas de los clientes.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setModalDatosSoporte(false)}
+                  className="rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 hover:bg-slate-100"
+                >
+                  Cerrar
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-4 p-5">
+              <Field label="WhatsApp de soporte" required>
+                <input
+                  value={datosSoporteTemp.whatsappSoporte}
+                  onChange={(event) =>
+                    setDatosSoporteTemp((actual) => ({
+                      ...actual,
+                      whatsappSoporte: event.target.value,
+                    }))
+                  }
+                  placeholder="Ej: 573001234567"
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field label="Email para soporte administrativo" required>
+                <input
+                  type="email"
+                  value={datosSoporteTemp.emailSoporteAdmin}
+                  onChange={(event) =>
+                    setDatosSoporteTemp((actual) => ({
+                      ...actual,
+                      emailSoporteAdmin: event.target.value,
+                    }))
+                  }
+                  placeholder="admin@empresa.com"
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field label="Email para soporte técnico" required>
+                <input
+                  type="email"
+                  value={datosSoporteTemp.emailSoporteTecnico}
+                  onChange={(event) =>
+                    setDatosSoporteTemp((actual) => ({
+                      ...actual,
+                      emailSoporteTecnico: event.target.value,
+                    }))
+                  }
+                  placeholder="tecnico@empresa.com"
+                  className={inputClass}
+                />
+              </Field>
+
+              <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4 text-sm font-semibold text-blue-800">
+                <p>Actual:</p>
+                <p className="mt-1">WhatsApp: {datosSoporte.whatsappSoporte || "Sin configurar"}</p>
+                <p>Admin: {datosSoporte.emailSoporteAdmin || "Sin configurar"}</p>
+                <p>Técnico: {datosSoporte.emailSoporteTecnico || "Sin configurar"}</p>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 border-t border-slate-200 bg-slate-50 p-5 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setModalDatosSoporte(false)}
+                className="rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm font-black text-slate-700 hover:bg-slate-100"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={guardarDatosSoporte}
+                disabled={guardandoDatosSoporte}
+                className="rounded-2xl bg-blue-600 px-5 py-3 text-sm font-black text-white shadow-lg shadow-blue-600/30 transition hover:bg-blue-500 disabled:opacity-60"
+              >
+                {guardandoDatosSoporte ? "Guardando..." : "Guardar datos"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {modalAbierto && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-black/70 px-3 py-4 backdrop-blur">
@@ -3131,11 +3973,33 @@ function AlertasTab({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           service_id: "service_ybahyy2",
-          template_id: "template_alerta_cartera",
+          template_id: "template_944w8rr",
           user_id: "ZnTClNQDNH6BiD1K1",
           template_params: {
             to_email: correo,
             to_name: cliente.razonSocial || "Cliente",
+
+            // Variables EXACTAS usadas en el template de EmailJS:
+            // {{razon_social}}, {{invoice_count}} y {{{invoice_list_html}}}
+            razon_social: cliente.razonSocial || "Cliente",
+            invoice_count: alertas.length,
+            invoice_list: detalleTexto,
+            invoice_list_html: `<table style="border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;">
+              <thead>
+                <tr style="background:#f1f5f9;">
+                  <th style="padding:8px;border:1px solid #ddd;text-align:left;">Mes</th>
+                  <th style="padding:8px;border:1px solid #ddd;text-align:left;">No. Factura</th>
+                  <th style="padding:8px;border:1px solid #ddd;text-align:left;">Fecha factura</th>
+                  <th style="padding:8px;border:1px solid #ddd;text-align:left;">Fecha radicación</th>
+                  <th style="padding:8px;border:1px solid #ddd;text-align:right;">Valor</th>
+                  <th style="padding:8px;border:1px solid #ddd;text-align:left;">Estado</th>
+                  <th style="padding:8px;border:1px solid #ddd;text-align:left;">Mora</th>
+                </tr>
+              </thead>
+              <tbody>${detalleHtml}</tbody>
+            </table>`,
+
+            // Variables antiguas conservadas por compatibilidad si otro template las usa.
             client_name: cliente.razonSocial || "Cliente",
             nit: cliente.nit,
             facturas_mora_count: alertas.length,
